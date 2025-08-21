@@ -10,7 +10,6 @@ TOKEN = os.getenv("token")
 
 SETTINGS_FILE = "settings.json"
 
-# Ensure settings file exists
 if not os.path.exists(SETTINGS_FILE):
     with open(SETTINGS_FILE, "w") as f:
         json.dump({}, f)
@@ -30,10 +29,11 @@ def save_settings(settings):
 
 
 class ReviewModal(discord.ui.Modal, title="Leave a Review"):
-    def __init__(self, target_user: discord.User, testimonial_channel_id: int):
+    def __init__(self, target_user: discord.User, testimonial_channel_id: int, reward_role_id: int = None):
         super().__init__()
         self.target_user = target_user
         self.testimonial_channel_id = testimonial_channel_id
+        self.reward_role_id = reward_role_id
 
         self.review_input = discord.ui.TextInput(
             label="Your Review",
@@ -45,28 +45,47 @@ class ReviewModal(discord.ui.Modal, title="Leave a Review"):
 
     async def on_submit(self, interaction: discord.Interaction):
         embed = discord.Embed(
-            title=f"⭐ Testimonial for {self.target_user.display_name} ⭐",
-            description=f"{self.target_user.mention}\n\n{self.review_input.value}",
-            color=discord.Color.random()
+            title=f"Testimonial for {self.target_user.display_name} <a:kv7_wave:1285921863901646849>",
+            description=self.review_input.value,
+            color=discord.Color.random(),
+            timestamp=interaction.created_at
         )
-        embed.set_footer(text=f"Review by {interaction.user.display_name}")
+        embed.set_author(name=f"New Review!", icon_url=interaction.user.display_avatar.url)
+        embed.set_thumbnail(url=self.target_user.display_avatar.url)
+        embed.add_field(name="Reviewer", value=f"{interaction.user.mention} ({interaction.user.display_name})", inline=True)
+        embed.add_field(name="Reviewed", value=f"{self.target_user.mention} ({self.target_user.display_name})", inline=True)
+        embed.set_footer(text=f"Submitted")
 
         channel = interaction.guild.get_channel(self.testimonial_channel_id)
         if channel:
             await channel.send(embed=embed)
-            await interaction.response.send_message("✅ Your review has been posted!", ephemeral=True)
+            
+            role_message = ""
+            if self.reward_role_id:
+                reward_role = interaction.guild.get_role(self.reward_role_id)
+                if reward_role and reward_role not in interaction.user.roles:
+                    try:
+                        await interaction.user.add_roles(reward_role, reason="Left a review")
+                        role_message = f" You've been awarded the {reward_role.name} role!"
+                    except discord.Forbidden:
+                        role_message = f" (Could not assign {reward_role.name} role - insufficient permissions)"
+                    except discord.HTTPException as e:
+                        role_message = f" (Error assigning role: {str(e)})"
+                elif reward_role and reward_role in interaction.user.roles:
+                    role_message = f" (You already have the {reward_role.name} role)"
+            
+            await interaction.response.send_message(f"✅ Your review has been posted!{role_message}", ephemeral=True)
         else:
             await interaction.response.send_message("❌ Testimonial channel not found.", ephemeral=True)
 
-
 class UserSelectView(discord.ui.View):
-    def __init__(self, testimonial_channel_id: int, guild: discord.Guild, role_id: int = None):
+    def __init__(self, testimonial_channel_id: int, guild: discord.Guild, role_id: int = None, reward_role_id: int = None):
         super().__init__(timeout=60)
         self.testimonial_channel_id = testimonial_channel_id
         self.guild = guild
         self.role_id = role_id
+        self.reward_role_id = reward_role_id
 
-        # Build user options based on role
         if role_id:
             role = guild.get_role(role_id)
             members = [m for m in role.members if not m.bot] if role else []
@@ -76,7 +95,7 @@ class UserSelectView(discord.ui.View):
         if members:
             options = [discord.SelectOption(label=m.display_name, value=str(m.id)) for m in members]
             select = discord.ui.Select(
-                placeholder="Select a user to review",
+                placeholder="Select a staff member to review",
                 min_values=1,
                 max_values=1,
                 options=options,
@@ -86,10 +105,10 @@ class UserSelectView(discord.ui.View):
             self.add_item(select)
         else:
             select = discord.ui.Select(
-                placeholder="No users available to review",
+                placeholder="No staff available to review",
                 min_values=1,
                 max_values=1,
-                options=[discord.SelectOption(label="No users available", value="none", default=True)],
+                options=[discord.SelectOption(label="No staff available", value="none", default=True)],
                 disabled=True
             )
             self.add_item(select)
@@ -100,16 +119,15 @@ class UserSelectView(discord.ui.View):
         if not target_user:
             await interaction.response.send_message("❌ User not found.", ephemeral=True)
             return
-
-        await interaction.response.send_modal(ReviewModal(target_user, self.testimonial_channel_id))
-
+        
+        await interaction.response.send_modal(ReviewModal(target_user, self.testimonial_channel_id, self.reward_role_id))
 
 class ReviewButtonView(discord.ui.View):
-    def __init__(self, testimonial_channel_id: int, guild: discord.Guild, role_id: int = None):
+    def __init__(self, testimonial_channel_id: int, role_id: int | None = None, reward_role_id: int | None = None):
         super().__init__(timeout=None)
         self.testimonial_channel_id = testimonial_channel_id
-        self.guild = guild
         self.role_id = role_id
+        self.reward_role_id = reward_role_id
 
     @discord.ui.button(
         label="Leave a Review",
@@ -121,12 +139,12 @@ class ReviewButtonView(discord.ui.View):
             "Select the user you wish to review:",
             view=UserSelectView(
                 testimonial_channel_id=self.testimonial_channel_id,
-                guild=self.guild,
-                role_id=self.role_id
+                guild=interaction.guild,
+                role_id=self.role_id,
+                reward_role_id=self.reward_role_id
             ),
             ephemeral=True
         )
-
 
 class ReviewBot(commands.Bot):
     def __init__(self):
@@ -136,45 +154,35 @@ class ReviewBot(commands.Bot):
         super().__init__(command_prefix=None, intents=intents)
 
     async def setup_hook(self):
-        # Restore persistent buttons on bot restart
         settings = load_settings()
         for guild_id_str, data in settings.items():
-            guild = self.get_guild(int(guild_id_str))
-            if not guild:
-                continue
-
             testimonial_channel_id = data.get("testimonial_channel")
             role_id = data.get("reviewable_role")
-            review_channel_id = data.get("review_channel")
+            reward_role_id = data.get("reward_role")
             review_message_id = data.get("review_message_id")
 
-            if testimonial_channel_id and review_channel_id and review_message_id:
-                review_channel = guild.get_channel(review_channel_id)
-                if review_channel:
-                    try:
-                        message = await review_channel.fetch_message(review_message_id)
-                        view = ReviewButtonView(testimonial_channel_id, guild, role_id)
-                        self.add_view(view)
-                        await message.edit(view=view)
-                    except discord.NotFound:
-                        print(f"Original review message {review_message_id} not found in guild {guild.name}.")
+            if testimonial_channel_id and review_message_id:
+                try:
+                    view = ReviewButtonView(testimonial_channel_id, role_id, reward_role_id)
+                    self.add_view(view, message_id=review_message_id)
+                    print(f"[setup_hook] Reattached persistent view to message {review_message_id} in guild {guild_id_str}")
+                except Exception as e:
+                    print(f"[setup_hook] Failed to reattach view for guild {guild_id_str}: {e}")
 
     async def on_ready(self):
         print(f"✅ Logged in as {self.user} (ID: {self.user.id})")
         await self.tree.sync()
 
-
 bot = ReviewBot()
 
-
-# Settings command
 @bot.tree.command(name="settings", description="Manage settings")
 @discord.app_commands.default_permissions(administrator=True)
-@app_commands.describe(action="Choose an action", channel="The channel to assign (if applicable)", role="The role whose members can be reviewed")
+@app_commands.describe(action="Choose an action", channel="The channel to assign (if applicable)", role="The role to assign")
 @app_commands.choices(action=[
     app_commands.Choice(name="Set Review Channel", value="set_review_channel"),
     app_commands.Choice(name="Set Testimonial Channel", value="set_testimonial_channel"),
     app_commands.Choice(name="Set Staff Role", value="set_reviewable_role"),
+    app_commands.Choice(name="Set Reward Role", value="set_reward_role"),
     app_commands.Choice(name="Clear Settings", value="clear"),
     app_commands.Choice(name="List Settings", value="list")
 ])
@@ -195,14 +203,16 @@ async def settings_command(interaction: discord.Interaction, action: app_command
 
         testimonial_id = settings[guild_id].get("testimonial_channel")
         role_id = settings[guild_id].get("reviewable_role")
+        reward_role_id = settings[guild_id].get("reward_role")
 
         if testimonial_id:
             embed = discord.Embed(title="💬 Leave a Review", description="Click the button below to submit your testimonial.", color=discord.Color.blurple())
-            message = await channel.send(embed=embed, view=ReviewButtonView(testimonial_id, interaction.guild, role_id))
+            view = ReviewButtonView(testimonial_id, role_id, reward_role_id)
+            message = await channel.send(embed=embed, view=view)
             settings[guild_id]["review_message_id"] = message.id
             save_settings(settings)
 
-            bot.add_view(ReviewButtonView(testimonial_id, interaction.guild, role_id))
+            bot.add_view(ReviewButtonView(testimonial_id, role_id, reward_role_id), message_id=message.id)
 
             await interaction.response.send_message(f"✅ Review channel set to {channel.mention} and embed posted.", ephemeral=True)
         else:
@@ -228,6 +238,16 @@ async def settings_command(interaction: discord.Interaction, action: app_command
         save_settings(settings)
         await interaction.response.send_message(f"✅ Reviewable role set to {role.name}.", ephemeral=True)
 
+    elif action.value == "set_reward_role":
+        if role is None:
+            await interaction.response.send_message("❌ Please provide a role.", ephemeral=True)
+            return
+        if guild_id not in settings:
+            settings[guild_id] = {}
+        settings[guild_id]["reward_role"] = role.id
+        save_settings(settings)
+        await interaction.response.send_message(f"✅ Reward role set to {role.name}. Users will receive this role after leaving a review.", ephemeral=True)
+
     elif action.value == "clear":
         settings.pop(guild_id, None)
         save_settings(settings)
@@ -237,16 +257,16 @@ async def settings_command(interaction: discord.Interaction, action: app_command
         current_review = settings.get(guild_id, {}).get("review_channel")
         current_testimonial = settings.get(guild_id, {}).get("testimonial_channel")
         current_role = settings.get(guild_id, {}).get("reviewable_role")
+        current_reward_role = settings.get(guild_id, {}).get("reward_role")
 
         msg = ""
         msg += f"💬 Review channel: {interaction.guild.get_channel(current_review).mention if current_review else 'Not set'}\n"
         msg += f"📝 Testimonial channel: {interaction.guild.get_channel(current_testimonial).mention if current_testimonial else 'Not set'}\n"
         msg += f"👤 Staff role: {interaction.guild.get_role(current_role).mention if current_role else 'Not set'}\n"
+        msg += f"🎁 Reward role: {interaction.guild.get_role(current_reward_role).mention if current_reward_role else 'Not set'}\n"
 
         await interaction.response.send_message(msg, ephemeral=True)
 
-
-# Generate command
 @bot.tree.command(name="generate", description="Post the review embed in the configured review channel")
 @discord.app_commands.default_permissions(administrator=True)
 @app_commands.checks.has_permissions(manage_guild=True)
@@ -254,6 +274,7 @@ async def generate_review_post(interaction: discord.Interaction):
     guild_id = str(interaction.guild.id)
     settings = load_settings()
     role_id = settings.get(guild_id, {}).get("reviewable_role")
+    reward_role_id = settings.get(guild_id, {}).get("reward_role")
 
     if (guild_id not in settings or "review_channel" not in settings[guild_id] or "testimonial_channel" not in settings[guild_id]):
         await interaction.response.send_message("❌ You must set both the review and testimonial channels first using `/settings`.", ephemeral=True)
@@ -267,17 +288,15 @@ async def generate_review_post(interaction: discord.Interaction):
         await interaction.response.send_message("❌ Review channel not found. Please reconfigure `/settings`.", ephemeral=True)
         return
 
-    embed = discord.Embed(title="💬 Leave a Review", description="Click the button below to review someone in this server.", color=discord.Color.blurple())
-    view = ReviewButtonView(testimonial_channel_id, interaction.guild, role_id)
+    embed = discord.Embed(title="💬 Leave a Review", description="Click the button below to review a staff member of this server.", color=discord.Color.blurple())
+    view = ReviewButtonView(testimonial_channel_id, role_id, reward_role_id)
     message = await review_channel.send(embed=embed, view=view)
 
-    # Save message ID for persistence
-    if guild_id not in settings:
-        settings[guild_id] = {}
     settings[guild_id]["review_message_id"] = message.id
     save_settings(settings)
 
-    bot.add_view(view)
+    bot.add_view(ReviewButtonView(testimonial_channel_id, role_id, reward_role_id), message_id=message.id)
+
     await interaction.response.send_message(f"✅ Review embed posted in {review_channel.mention}", ephemeral=True)
 
 bot.run(TOKEN)
