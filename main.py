@@ -196,8 +196,16 @@ class ReviewModal(discord.ui.Modal, title="Leave a Review"):
             )
             embed.set_author(name=f"New Review!", icon_url=interaction.user.display_avatar.url)
             embed.set_thumbnail(url=self.target_user.display_avatar.url)
-            embed.add_field(name="Reviewer", value=f"{interaction.user.mention} ({interaction.user.display_name})", inline=True)
-            embed.add_field(name="Reviewed", value=f"{self.target_user.mention} ({self.target_user.display_name})", inline=True)
+            embed.add_field(
+                name="Reviewer",
+                value=f"{interaction.user.mention} (`{interaction.user.name}`)",
+                inline=True
+            )
+            embed.add_field(
+                name="Reviewed",
+                value=f"{self.target_user.mention} (`{self.target_user.name}`)",
+                inline=True
+            )
             
             if review_id:
                 embed.set_footer(text=f"ID: {review_id} • Submitted")
